@@ -12,6 +12,7 @@ export class AppComponent implements OnInit, OnDestroy {
   isConnected = false;
 
   faces: Record<string, any> = {};
+  currentFrame: string = '';
 
   // Dynamic viewport dimensions for scaling normalised coords
   viewportWidth: number = window.innerWidth;
@@ -21,7 +22,8 @@ export class AppComponent implements OnInit, OnDestroy {
   fps: number = 0;
   private lastFrameTimestamp: number = 0;
 
-  private sub: Subscription = new Subscription();
+  sub: Subscription = new Subscription();
+  cameraStarted: boolean = false;
 
   constructor(private wsService: WebsocketService) { }
 
@@ -41,10 +43,29 @@ export class AppComponent implements OnInit, OnDestroy {
     }));
   }
 
-  private processInferenceData(data: InferenceData) {
-    if (!data || !data.faces) return;
+  async startSession() {
+    try {
+      // Request permission in browser first (even though backend handles capture, 
+      // this ensures the user grants privacy permission and we know hardware exists)
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      // Stop the stream immediately, backend will handle the real capture
+      stream.getTracks().forEach(track => track.stop());
 
-    this.faces = data.faces;
+      this.cameraStarted = true;
+      this.wsService.sendMessage({ type: 'START_INF' });
+    } catch (err) {
+      console.error('Camera permission denied or not found:', err);
+      alert('Camera access is required for real-time analysis.');
+    }
+  }
+
+  private processInferenceData(data: InferenceData) {
+    if (!data) return;
+
+    this.faces = data.faces || {};
+    if (data.frame) {
+      this.currentFrame = data.frame;
+    }
 
     const now = performance.now();
     if (this.lastFrameTimestamp > 0) {

@@ -11,15 +11,14 @@ import { Component, Input } from '@angular/core';
       <div class="absolute inset-0 rounded-lg pointer-events-none"
            style="border: 2px solid rgba(251, 191, 36, 0.5);
                   box-shadow: 0 0 12px rgba(251, 191, 36, 0.25),
-                              inset 0 0 12px rgba(251, 191, 36, 0.08);
-                  transition: all 0.3s ease;">
+                              inset 0 0 12px rgba(251, 191, 36, 0.08);">
       </div>
       
-      <!-- Glassmorphic Side Panel -->
+      <!-- Unified Side Panel: Identity + Gauge + Waveform -->
       <div class="absolute left-full top-0 ml-3 flex flex-col w-[240px] pointer-events-auto
                   backdrop-blur-xl rounded-2xl overflow-hidden
                   transition-all duration-300 ease-out"
-           style="background: rgba(30, 25, 20, 0.75);
+           style="background: rgba(30, 25, 20, 0.80);
                   border: 1px solid rgba(251, 191, 36, 0.15);
                   box-shadow: 0 8px 32px rgba(0,0,0,0.5), 0 0 20px rgba(251, 191, 36, 0.06);">
       
@@ -42,6 +41,18 @@ import { Component, Input } from '@angular/core';
                [probabilities]="probabilities">
             </app-emotion-wheel>
          </div>
+         
+         <div class="w-full h-px" style="background: linear-gradient(90deg, transparent, rgba(251,191,36,0.15), transparent);"></div>
+
+         <!-- Heart Rate Waveform -->
+         <div class="px-3 py-3" *ngIf="rppg">
+            <app-bio-signal-waveform
+               [bpm]="rppg.bpm"
+               [quality]="rppg.quality_score"
+               [waveform]="rppg.waveform"
+               [state]="rppg.calibration_state">
+            </app-bio-signal-waveform>
+         </div>
       </div>
     </div>
   `,
@@ -57,4 +68,5 @@ export class FaceCardComponent {
    @Input() emotion: string = 'Neutral';
    @Input() emotionConfidence: number = 0;
    @Input() probabilities: Record<string, number> = {};
+   @Input() rppg: any = null;
 }

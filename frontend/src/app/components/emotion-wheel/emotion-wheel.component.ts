@@ -5,9 +5,9 @@ import { Component, Input, OnChanges, SimpleChanges, ViewChild, ElementRef, Afte
   template: `
     <div class="relative flex flex-col items-center">
       <!-- Radial Gauge -->
-      <div class="relative" style="width: 190px; height: 190px;">
-        <canvas #wheelCanvas width="380" height="380"
-                style="width: 190px; height: 190px;"></canvas>
+      <div class="relative" style="width: 200px; height: 200px;">
+        <canvas #wheelCanvas width="400" height="400"
+                style="width: 200px; height: 200px;"></canvas>
         <!-- Center Emoji -->
         <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
           <span class="text-3xl drop-shadow-lg">{{ getDominantEmoji() }}</span>
@@ -15,7 +15,7 @@ import { Component, Input, OnChanges, SimpleChanges, ViewChild, ElementRef, Afte
       </div>
 
       <!-- Dominant Emotion Summary -->
-      <div class="flex items-center gap-2.5 mt-2 px-2">
+      <div class="flex items-center gap-2.5 mt-1.5">
         <span class="text-xl">{{ getDominantEmoji() }}</span>
         <div class="flex flex-col leading-tight">
           <span class="text-white font-bold text-base">{{ dominantEmotion }}</span>
@@ -62,114 +62,104 @@ export class EmotionWheelComponent implements AfterViewInit, OnChanges {
     const c = this.canvasRef.nativeElement;
     const w = c.width, h = c.height;
     const cx = w / 2, cy = h / 2;
-    const R = 165; // Outer radius
-    const r = 120; // Inner radius
-    const mid = (R + r) / 2;
-    const band = R - r;
+
+    // Ring dimensions — thin and clean
+    const outerR = 155;
+    const innerR = 130;
+    const midR = (outerR + innerR) / 2;
+    const arcWidth = outerR - innerR;  // = 25px, thin band
 
     this.ctx.clearRect(0, 0, w, h);
 
     const N = this.emotions.length;
-    const gap = 0.035; // gap between segments in radians
+    const gap = 0.05;  // radians between segments
     const slice = (2 * Math.PI) / N;
-    const off = -Math.PI / 2; // start from top
+    const startAngle = -Math.PI / 2;  // top
 
-    // ── Background track ──
+    // ── Background track segments ──
     for (let i = 0; i < N; i++) {
-      const a0 = off + i * slice + gap;
-      const a1 = off + (i + 1) * slice - gap;
+      const a0 = startAngle + i * slice + gap / 2;
+      const a1 = startAngle + (i + 1) * slice - gap / 2;
       this.ctx.beginPath();
-      this.ctx.arc(cx, cy, mid, a0, a1);
-      this.ctx.lineWidth = band;
+      this.ctx.arc(cx, cy, midR, a0, a1);
+      this.ctx.lineWidth = arcWidth;
       this.ctx.lineCap = 'butt';
-      this.ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+      this.ctx.strokeStyle = 'rgba(255,255,255,0.07)';
       this.ctx.stroke();
     }
 
-    // ── Tick marks ──
-    this.ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+    // ── Fine tick marks ──
+    this.ctx.strokeStyle = 'rgba(255,255,255,0.10)';
     this.ctx.lineWidth = 1;
-    const tickCount = 60;
-    for (let i = 0; i < tickCount; i++) {
-      const a = off + (i / tickCount) * 2 * Math.PI;
-      const isMajor = i % (tickCount / N) === 0;
-      const t0 = isMajor ? r - 6 : r - 2;
-      const t1 = r + 2;
+    for (let i = 0; i < 70; i++) {
+      const a = startAngle + (i / 70) * 2 * Math.PI;
+      const r0 = innerR - 2;
+      const r1 = innerR + 4;
       this.ctx.beginPath();
-      this.ctx.moveTo(cx + t0 * Math.cos(a), cy + t0 * Math.sin(a));
-      this.ctx.lineTo(cx + t1 * Math.cos(a), cy + t1 * Math.sin(a));
+      this.ctx.moveTo(cx + r0 * Math.cos(a), cy + r0 * Math.sin(a));
+      this.ctx.lineTo(cx + r1 * Math.cos(a), cy + r1 * Math.sin(a));
       this.ctx.stroke();
     }
 
-    // ── Filled arcs per emotion ──
+    // ── Filled probability arcs ──
     for (let i = 0; i < N; i++) {
       const em = this.emotions[i];
       const prob = this.probabilities?.[em.key] || 0;
       if (prob < 0.01) continue;
 
-      const a0 = off + i * slice + gap;
-      const a1 = off + (i + 1) * slice - gap;
+      const a0 = startAngle + i * slice + gap / 2;
+      const a1 = startAngle + (i + 1) * slice - gap / 2;
       const fillEnd = a0 + (a1 - a0) * Math.min(1, prob);
 
-      // Glow layer
-      this.ctx.beginPath();
-      this.ctx.arc(cx, cy, mid, a0, fillEnd);
-      this.ctx.lineWidth = band + 4;
-      this.ctx.lineCap = 'butt';
-      this.ctx.strokeStyle = em.color + '30'; // 30 = ~19% alpha
-      this.ctx.stroke();
-
-      // Main arc
-      this.ctx.beginPath();
-      this.ctx.arc(cx, cy, mid, a0, fillEnd);
-      this.ctx.lineWidth = band - 6;
-      this.ctx.lineCap = 'round';
-
-      // Gradient along arc
-      const grd = this.ctx.createLinearGradient(
-        cx + R * Math.cos(a0), cy + R * Math.sin(a0),
-        cx + R * Math.cos(fillEnd), cy + R * Math.sin(fillEnd)
-      );
-      grd.addColorStop(0, em.color + 'cc');
-      grd.addColorStop(1, em.color);
-      this.ctx.strokeStyle = grd;
-
-      // Extra glow on dominant
+      // Outer glow
       if (em.key === this.dominantEmotion) {
+        this.ctx.beginPath();
+        this.ctx.arc(cx, cy, midR, a0, fillEnd);
+        this.ctx.lineWidth = arcWidth + 6;
+        this.ctx.lineCap = 'butt';
+        this.ctx.strokeStyle = em.color + '25';
         this.ctx.shadowColor = em.color;
-        this.ctx.shadowBlur = 16;
+        this.ctx.shadowBlur = 12;
+        this.ctx.stroke();
+        this.ctx.shadowBlur = 0;
       }
+
+      // Main filled arc
+      this.ctx.beginPath();
+      this.ctx.arc(cx, cy, midR, a0, fillEnd);
+      this.ctx.lineWidth = arcWidth - 4;
+      this.ctx.lineCap = 'round';
+      this.ctx.strokeStyle = em.color;
       this.ctx.stroke();
-      this.ctx.shadowBlur = 0;
     }
 
-    // ── Labels around outside ──
+    // ── Labels ──
     for (let i = 0; i < N; i++) {
       const em = this.emotions[i];
       const prob = this.probabilities?.[em.key] || 0;
-      const a = off + (i + 0.5) * slice;
-      const lr = R + 16;
-      const lx = cx + lr * Math.cos(a);
-      const ly = cy + lr * Math.sin(a);
-
-      this.ctx.save();
-      this.ctx.translate(lx, ly);
+      const midAngle = startAngle + (i + 0.5) * slice;
       const isDom = em.key === this.dominantEmotion;
-      this.ctx.fillStyle = isDom ? '#ffffff' : 'rgba(255,255,255,0.35)';
-      this.ctx.font = isDom ? 'bold 16px Inter, sans-serif' : '14px Inter, sans-serif';
+
+      // Emotion label outside ring
+      const labelR = outerR + 22;
+      const lx = cx + labelR * Math.cos(midAngle);
+      const ly = cy + labelR * Math.sin(midAngle);
+      this.ctx.save();
+      this.ctx.fillStyle = isDom ? '#ffffff' : 'rgba(255,255,255,0.4)';
+      this.ctx.font = isDom ? 'bold 17px Inter, sans-serif' : '14px Inter, sans-serif';
       this.ctx.textAlign = 'center';
       this.ctx.textBaseline = 'middle';
-      this.ctx.fillText(em.label, 0, 0);
+      this.ctx.fillText(em.label, lx, ly);
       this.ctx.restore();
 
-      // Percentage markers inside ring
+      // Percentage inside ring
       if (prob > 0.03) {
-        const pr = r - 14;
-        const px = cx + pr * Math.cos(a);
-        const py = cy + pr * Math.sin(a);
+        const pctR = innerR - 16;
+        const px = cx + pctR * Math.cos(midAngle);
+        const py = cy + pctR * Math.sin(midAngle);
         this.ctx.save();
-        this.ctx.fillStyle = 'rgba(255,255,255,0.4)';
-        this.ctx.font = '12px JetBrains Mono, monospace';
+        this.ctx.fillStyle = isDom ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.3)';
+        this.ctx.font = '13px JetBrains Mono, monospace';
         this.ctx.textAlign = 'center';
         this.ctx.textBaseline = 'middle';
         this.ctx.fillText((prob * 100).toFixed(0) + '%', px, py);
@@ -177,10 +167,10 @@ export class EmotionWheelComponent implements AfterViewInit, OnChanges {
       }
     }
 
-    // ── Inner circle ──
+    // ── Inner ring border ──
     this.ctx.beginPath();
-    this.ctx.arc(cx, cy, r - 8, 0, 2 * Math.PI);
-    this.ctx.strokeStyle = 'rgba(251,191,36,0.1)';
+    this.ctx.arc(cx, cy, innerR - 8, 0, 2 * Math.PI);
+    this.ctx.strokeStyle = 'rgba(251,191,36,0.08)';
     this.ctx.lineWidth = 1;
     this.ctx.stroke();
   }

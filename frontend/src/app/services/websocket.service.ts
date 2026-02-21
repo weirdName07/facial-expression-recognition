@@ -7,6 +7,7 @@ export interface InferenceData {
     frame_id: number;
     timestamp: number;
     faces: Record<string, any>;
+    frame?: string; // base64 JPEG from backend camera
 }
 
 @Injectable({

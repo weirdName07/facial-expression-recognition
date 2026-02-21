@@ -37,6 +37,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 r = RedisPubSub()
+start_event = asyncio.Event()
 
 @app.on_event("startup")
 async def startup_event():
@@ -53,14 +54,26 @@ async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-             # Wait for client messages (e.g. ping/pong, config updates)
+             # Wait for client messages
              data = await websocket.receive_text()
-             # We can optionally handle client configuration updates here
+             try:
+                 msg = json.loads(data)
+                 if msg.get("type") == "START_INF":
+                     logging.info("Received START_INF command from frontend")
+                     start_event.set()
+             except:
+                 pass
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+        # If no one is left, signal the runner to stop
+        if not manager.active_connections:
+            logging.info("All clients disconnected. Clearing start_event.")
+            start_event.clear()
     except Exception as e:
         logging.error(f"WebSocket error: {e}")
         manager.disconnect(websocket)
+        if not manager.active_connections:
+            start_event.clear()
 
 if __name__ == "__main__":
     import uvicorn

@@ -1,188 +1,154 @@
 """
-Unified backend runner — runs ALL services + aggregator in a single process.
-Run from the project root:
-    python backend/run_all_services.py
+Unified backend runner — real AI inference pipeline.
+
+Captures webcam via OpenCV, runs YOLOv11 face detection + PyTorch emotion
+classification, and broadcasts results via WebSocket gateway. rPPG remains
+mock (future real implementation requires CHROM/POS signal processing).
+
+Run:  python backend/run_all_services.py
 """
 
 import sys
 import os
 import asyncio
-import json
+import base64
 import time
 import math
 import random
 import logging
+import threading
+import queue
 
 # Ensure project root is on sys.path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+import cv2
+import numpy as np
 import uvicorn
+
 from backend.shared.redis_client import RedisPubSub
-from backend.gateway.main import app as gateway_app
+from backend.gateway.main import app as gateway_app, start_event
+from backend.services.face_tracking.face_detector import load_model as load_face_model, detect_faces
+from backend.services.expression_recognition.emotion_classifier import (
+    load_model as load_emotion_model, classify_emotion, EMOTION_CLASSES
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger("unified-runner")
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  TEMPORALLY SMOOTH FACE TRACKING  (simulates stable detection)
+#  CAMERA CAPTURE THREAD (blocking OpenCV in a background thread)
 # ═══════════════════════════════════════════════════════════════════
-class SmoothFaceTracker:
-    """
-    Generates temporally-stable mock bounding boxes with very low jitter.
-    In production this would be YOLOv11 + ByteTrack.
-    """
+class CameraThread:
+    """Captures webcam frames in a separate thread. Non-blocking for asyncio."""
 
-    def __init__(self):
-        # Centred face position in normalised coordinates (0-1)
-        self.cx = 0.50
-        self.cy = 0.40
-        self.half_w = 0.14
-        self.half_h = 0.25
+    def __init__(self, camera_index: int = 0, target_fps: int = 15):
+        self.cap = None
+        self.camera_index = camera_index
+        self.target_fps = target_fps
+        self.frame_queue: queue.Queue = queue.Queue(maxsize=2)
+        self._running = False
+        self._thread = None
 
-    def step(self):
-        # Very subtle drift to simulate natural head movement
-        self.cx += random.gauss(0, 0.002)
-        self.cy += random.gauss(0, 0.001)
-        # Clamp to reasonable range
-        self.cx = max(0.30, min(0.70, self.cx))
-        self.cy = max(0.25, min(0.55, self.cy))
+    def start(self):
+        self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
+        self._running = True
+        self._thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._thread.start()
+        log.info("Camera capture thread started")
 
-        return {
-            "face_id": "person_1",
-            "bbox": {
-                "x_min": round(self.cx - self.half_w, 4),
-                "y_min": round(self.cy - self.half_h, 4),
-                "x_max": round(self.cx + self.half_w, 4),
-                "y_max": round(self.cy + self.half_h, 4),
-            },
-            "landmarks": [
-                {"x": round(self.cx - 0.04, 4), "y": round(self.cy - 0.04, 4)},
-                {"x": round(self.cx + 0.04, 4), "y": round(self.cy - 0.04, 4)},
-                {"x": round(self.cx, 4),         "y": round(self.cy + 0.06, 4)},
-            ],
-            "confidence": round(0.96 + random.uniform(0, 0.03), 3),
-        }
+    def _capture_loop(self):
+        interval = 1.0 / self.target_fps
+        while self._running:
+            ret, frame = self.cap.read()
+            if not ret:
+                continue
+            # Drop old frames — always keep the latest
+            if self.frame_queue.full():
+                try:
+                    self.frame_queue.get_nowait()
+                except queue.Empty:
+                    pass
+            self.frame_queue.put(frame)
+            time.sleep(interval)
 
+    def get_frame(self) -> np.ndarray | None:
+        try:
+            return self.frame_queue.get_nowait()
+        except queue.Empty:
+            return None
 
-tracker = SmoothFaceTracker()
-
-
-async def face_tracking_loop(redis: RedisPubSub):
-    frame = 0
-    log.info("Face Tracking loop started (smooth)")
-    try:
-        while True:
-            await asyncio.sleep(0.1)  # 10 FPS
-            face = tracker.step()
-            await redis.publish("face_crops", {"frame": frame, "faces": [face]})
-            frame += 1
-    except asyncio.CancelledError:
-        log.info("Face tracking loop cancelled")
+    def stop(self):
+        self._running = False
+        if self.cap:
+            self.cap.release()
+        log.info("Camera capture thread stopped")
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  TEMPORALLY SMOOTH EXPRESSION RECOGNITION
+#  EMA SMOOTHER — for temporally stable outputs
 # ═══════════════════════════════════════════════════════════════════
-EMOTIONS = ["Happy", "Neutral", "Sad", "Angry", "Surprise", "Fear", "Disgust"]
-EMA_ALPHA = 0.08  # Low alpha = smoother/slower transitions
+class EMASmoother:
+    """Exponential Moving Average smoother for emotion probabilities."""
 
-class SmoothExpressionEngine:
-    """
-    Generates emotion probabilities that transition slowly and naturally.
-    Uses EMA (Exponential Moving Average) smoothing.
-    """
+    def __init__(self, alpha: float = 0.3):
+        self.alpha = alpha
+        self.state: dict | None = None
 
-    def __init__(self):
-        # Start neutral
-        self.current_probs = {e: (0.9 if e == "Neutral" else 0.02) for e in EMOTIONS}
-        self.target_probs = dict(self.current_probs)
-        self.frames_until_shift = 50  # Change target emotion every ~5s
-
-    def step(self) -> dict:
-        self.frames_until_shift -= 1
-
-        if self.frames_until_shift <= 0:
-            # Pick a new dominant emotion with weighted probabilities
-            dominant = random.choices(
-                EMOTIONS,
-                weights=[5, 4, 1, 1, 2, 1, 0.5],
-                k=1
-            )[0]
-            # Generate new target distribution centred on the dominant emotion
-            raw = {}
-            for e in EMOTIONS:
-                if e == dominant:
-                    raw[e] = random.uniform(0.6, 0.85)
-                else:
-                    raw[e] = random.uniform(0.01, 0.1)
-            total = sum(raw.values())
-            self.target_probs = {e: v / total for e, v in raw.items()}
-            # Next shift in 30-80 frames (3-8 seconds at 10 FPS)
-            self.frames_until_shift = random.randint(30, 80)
-
-        # EMA smoothing toward target
-        for e in EMOTIONS:
-            self.current_probs[e] += EMA_ALPHA * (self.target_probs[e] - self.current_probs[e])
-
+    def smooth(self, raw_probs: dict) -> dict:
+        if self.state is None:
+            self.state = dict(raw_probs)
+        else:
+            for k in raw_probs:
+                self.state[k] = self.alpha * raw_probs[k] + (1 - self.alpha) * self.state.get(k, 0)
         # Normalise
-        total = sum(self.current_probs.values())
-        probs = {e: round(v / total, 4) for e, v in self.current_probs.items()}
-
-        dominant = max(probs, key=probs.get)
-        return {
-            "dominant_emotion": dominant,
-            "probabilities": probs,
-            "confidence": round(probs[dominant], 3),
-        }
-
-
-expr_engine = SmoothExpressionEngine()
-
-
-async def expression_callback(data: dict, redis: RedisPubSub):
-    for face in data.get("faces", []):
-        result = expr_engine.step()
-        result["face_id"] = face["face_id"]
-        await redis.publish("expression_results", result)
+        total = sum(self.state.values())
+        if total > 0:
+            return {k: round(v / total, 4) for k, v in self.state.items()}
+        return self.state
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  TEMPORALLY SMOOTH rPPG HEART RATE
+#  rPPG MOCK — realistic ECG waveform (kept from previous version)
 # ═══════════════════════════════════════════════════════════════════
-class SmoothHeartRateEngine:
-    """
-    Produces a realistic, slowly-drifting heart rate and clean PPG waveform.
-    """
-
+class MockHeartRateEngine:
     def __init__(self):
-        self.base_bpm = 72.0          # Resting heart rate
+        self.base_bpm = 72.0
         self.current_bpm = 72.0
         self.phase = 0.0
-        self.calibration_frames = 30  # First 3 seconds = calibrating
+        self.calibration_frames = 30
+
+    @staticmethod
+    def _ecg_beat(t: float) -> float:
+        p = 0.12 * math.exp(-((t - 0.15) ** 2) / 0.002)
+        q = -0.08 * math.exp(-((t - 0.30) ** 2) / 0.0004)
+        r = 0.85 * math.exp(-((t - 0.35) ** 2) / 0.0006)
+        s = -0.15 * math.exp(-((t - 0.40) ** 2) / 0.0006)
+        tw = 0.18 * math.exp(-((t - 0.60) ** 2) / 0.006)
+        return p + q + r + s + tw
 
     def step(self) -> dict:
-        # Slowly drift BPM
         self.base_bpm += random.gauss(0, 0.1)
         self.base_bpm = max(62, min(85, self.base_bpm))
-        # EMA smooth the displayed BPM
         self.current_bpm += 0.05 * (self.base_bpm - self.current_bpm)
 
-        # Generate clean sinusoidal PPG waveform
-        freq = self.current_bpm / 60.0  # Hz
+        n_samples = 50
+        beat_period = 60.0 / self.current_bpm
+        total_time = 2.0 * beat_period
         waveform = []
-        for i in range(50):
-            t = self.phase + i * 0.02
-            # Primary cardiac signal + smaller harmonic
-            val = (0.7 * math.sin(2 * math.pi * freq * t)
-                   + 0.2 * math.sin(4 * math.pi * freq * t)
-                   + random.gauss(0, 0.03))
+        for i in range(n_samples):
+            t_sec = self.phase + (i / n_samples) * total_time
+            t_in_beat = (t_sec % beat_period) / beat_period
+            val = self._ecg_beat(t_in_beat) + random.gauss(0, 0.015)
             waveform.append(round(val, 3))
-        self.phase += 0.5
+        self.phase += total_time * 0.3
 
-        # Handle calibration state
         if self.calibration_frames > 0:
             self.calibration_frames -= 1
             state = "CALIBRATING"
@@ -197,71 +163,103 @@ class SmoothHeartRateEngine:
         }
 
 
-hr_engine = SmoothHeartRateEngine()
-
-
-async def rppg_callback(data: dict, redis: RedisPubSub):
-    for face in data.get("faces", []):
-        result = hr_engine.step()
-        result["face_id"] = face["face_id"]
-        await redis.publish("rppg_results", result)
-
-
 # ═══════════════════════════════════════════════════════════════════
-#  AGGREGATOR — Merges all service outputs → "inference_results"
+#  MAIN INFERENCE LOOP
 # ═══════════════════════════════════════════════════════════════════
-class Aggregator:
-    def __init__(self, redis: RedisPubSub):
-        self.redis = redis
-        self.faces: dict = {}
-        self.frame_id = 0
+async def inference_loop(redis: RedisPubSub, camera: CameraThread):
+    """
+    Main inference loop:
+      1. Wait for start signal from frontend
+      2. Start camera and run inference session
+      3. Stop camera and wait again if start signal is cleared
+    """
+    try:
+        while True:
+            log.info("Inference loop waiting for START_INF from frontend...")
+            await start_event.wait()
+            log.info("Start signal received! Initialising camera...")
+            
+            camera.start()
+            # Give camera a moment to initialise
+            await asyncio.sleep(1.0)
 
-    async def on_face_crops(self, data: dict):
-        for face in data.get("faces", []):
-            fid = face["face_id"]
-            self.faces.setdefault(fid, {})
-            self.faces[fid]["bbox"] = face["bbox"]
-            self.faces[fid]["landmarks"] = face["landmarks"]
-            self.faces[fid]["tracking_confidence"] = face["confidence"]
+            emotion_smoother = EMASmoother(alpha=0.25)
+            hr_engine = MockHeartRateEngine()
+            frame_id = 0
 
-        # Trigger expression + rPPG processing on same frame
-        await expression_callback(data, self.redis)
-        await rppg_callback(data, self.redis)
+            log.info("Inference session active — processing real camera frames")
 
-    async def on_expression(self, data: dict):
-        fid = data.get("face_id")
-        if fid and fid in self.faces:
-            self.faces[fid]["expression"] = {
-                "dominant_emotion": data["dominant_emotion"],
-                "probabilities": data["probabilities"],
-                "confidence": data["confidence"],
-            }
+            try:
+                while start_event.is_set():
+                    await asyncio.sleep(0.066)  # ~15 FPS target
 
-    async def on_rppg(self, data: dict):
-        fid = data.get("face_id")
-        if fid and fid in self.faces:
-            self.faces[fid]["rppg"] = {
-                "bpm": data["bpm"],
-                "quality_score": data["quality_score"],
-                "waveform": data["waveform"],
-                "calibration_state": data["calibration_state"],
-            }
+                    frame = camera.get_frame()
+                    if frame is None:
+                        continue
 
-    async def broadcast_loop(self):
-        log.info("Aggregator broadcast loop started")
-        try:
-            while True:
-                await asyncio.sleep(0.1)
-                if self.faces:
+                    # ── Face Detection (run in thread to avoid blocking event loop) ──
+                    detected = await asyncio.to_thread(detect_faces, frame, 0.35)
+
+                    # ── Build per-face data ──
+                    faces_payload = {}
+                    for face_data in detected:
+                        fid = face_data["face_id"]
+
+                        # Expression classification
+                        try:
+                            dominant, conf, probs = await asyncio.to_thread(
+                                classify_emotion, face_data["crop"]
+                            )
+                            smoothed = emotion_smoother.smooth(probs)
+                            dominant = max(smoothed, key=smoothed.get)
+                            conf = smoothed[dominant]
+                        except Exception as e:
+                            log.warning(f"Emotion classification failed: {e}")
+                            smoothed = {em: round(1.0 / 7, 4) for em in EMOTION_CLASSES}
+                            dominant = "Neutral"
+                            conf = smoothed["Neutral"]
+
+                        # rPPG (mock)
+                        rppg = hr_engine.step()
+
+                        faces_payload[fid] = {
+                            "bbox": face_data["bbox"],
+                            "tracking_confidence": face_data["confidence"],
+                            "expression": {
+                                "dominant_emotion": dominant,
+                                "probabilities": smoothed,
+                                "confidence": round(conf, 3),
+                            },
+                            "rppg": rppg,
+                        }
+
+                    # ── Encode frame as base64 JPEG for frontend display ──
+                    _, jpeg_buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                    frame_b64 = base64.b64encode(jpeg_buf).decode('ascii')
+
+                    # ── Publish ──
                     payload = {
-                        "frame_id": self.frame_id,
+                        "frame_id": frame_id,
                         "timestamp": time.time(),
-                        "faces": dict(self.faces),
+                        "faces": faces_payload,
+                        "frame": frame_b64,
                     }
-                    await self.redis.publish("inference_results", payload)
-                    self.frame_id += 1
-        except asyncio.CancelledError:
-            log.info("Aggregator broadcast loop cancelled")
+                    await redis.publish("inference_results", payload)
+                    frame_id += 1
+                
+                log.info("Inference session ended (start_event cleared).")
+
+            except Exception as e:
+                log.error(f"Inference session error: {e}")
+            finally:
+                camera.stop()
+                log.info("Camera released.")
+                # Clear any remaining frames
+                while camera.get_frame() is not None:
+                    pass
+
+    except asyncio.CancelledError:
+        log.info("Inference loop cancelled")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -275,23 +273,29 @@ async def run_gateway():
 
 async def main():
     log.info("=" * 60)
-    log.info("  Facial Expression Platform — Unified Backend Runner")
+    log.info("  Facial Expression Platform — AI Inference Runner")
     log.info("=" * 60)
 
-    redis_tracking = RedisPubSub()
-    redis_expr_sub = RedisPubSub()
-    redis_rppg_sub = RedisPubSub()
+    # ── Load AI models ──
+    log.info("Loading YOLOv11 face detector...")
+    await asyncio.to_thread(load_face_model)
 
-    aggregator = Aggregator(redis_tracking)
+    log.info("Loading PyTorch emotion classifier...")
+    await asyncio.to_thread(load_emotion_model)
 
-    await asyncio.gather(
-        run_gateway(),
-        face_tracking_loop(redis_tracking),
-        redis_tracking.subscribe("face_crops", aggregator.on_face_crops),
-        redis_expr_sub.subscribe("expression_results", aggregator.on_expression),
-        redis_rppg_sub.subscribe("rppg_results", aggregator.on_rppg),
-        aggregator.broadcast_loop(),
-    )
+    # ── Camera Setup (lazily started in inference_loop) ──
+    camera = CameraThread(camera_index=0, target_fps=15)
+
+    # ── Redis ──
+    redis = RedisPubSub()
+
+    try:
+        await asyncio.gather(
+            run_gateway(),
+            inference_loop(redis, camera),
+        )
+    finally:
+        camera.stop()
 
 
 if __name__ == "__main__":
