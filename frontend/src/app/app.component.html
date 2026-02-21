@@ -42,7 +42,7 @@
    <app-camera-stream class="absolute inset-0 w-full h-full" [frameBase64]="currentFrame"></app-camera-stream>
 
    <!-- Annotation Overlay -->
-   <div class="absolute inset-0 pointer-events-none overflow-hidden">
+   <div class="absolute inset-0 pointer-events-none overflow-hidden" style="transform: scaleX(-1);">
       <ng-container *ngFor="let id of objectKeys(faces)">
          <app-face-card [faceId]="id" [x]="faces[id].bbox.x_min * viewportWidth"
             [y]="faces[id].bbox.y_min * viewportHeight"
@@ -50,7 +50,7 @@
             [height]="(faces[id].bbox.y_max - faces[id].bbox.y_min) * viewportHeight"
             [confidence]="faces[id].tracking_confidence" [emotion]="faces[id].expression?.dominant_emotion"
             [emotionConfidence]="faces[id].expression?.confidence" [probabilities]="faces[id].expression?.probabilities"
-            [rppg]="faces[id].rppg">
+            [rppg]="faces[id].rppg" [screenWidth]="viewportWidth">
          </app-face-card>
       </ng-container>
    </div>

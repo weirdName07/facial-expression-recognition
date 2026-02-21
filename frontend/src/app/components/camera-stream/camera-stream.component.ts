@@ -1,4 +1,5 @@
 import { Component, Input, OnChanges, SimpleChanges } from '@angular/core';
+import { DomSanitizer, SafeUrl } from '@angular/platform-browser';
 
 @Component({
   selector: 'app-camera-stream',
@@ -20,11 +21,14 @@ import { Component, Input, OnChanges, SimpleChanges } from '@angular/core';
 })
 export class CameraStreamComponent implements OnChanges {
   @Input() frameBase64: string = '';
-  frameSrc: string = '';
+  frameSrc: SafeUrl | null = null;
+
+  constructor(private sanitizer: DomSanitizer) { }
 
   ngOnChanges(changes: SimpleChanges) {
     if (changes['frameBase64'] && this.frameBase64) {
-      this.frameSrc = 'data:image/jpeg;base64,' + this.frameBase64;
+      this.frameSrc = this.sanitizer.bypassSecurityTrustUrl('data:image/jpeg;base64,' + this.frameBase64);
     }
   }
 }
+

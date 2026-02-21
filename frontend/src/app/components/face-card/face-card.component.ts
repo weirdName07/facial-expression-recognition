@@ -15,9 +15,13 @@ import { Component, Input } from '@angular/core';
       </div>
       
       <!-- Unified Side Panel: Identity + Gauge + Waveform -->
-      <div class="absolute left-full top-0 ml-3 flex flex-col w-[240px] pointer-events-auto
+      <div class="absolute top-0 flex flex-col w-[240px] pointer-events-auto
                   backdrop-blur-xl rounded-2xl overflow-hidden
                   transition-all duration-300 ease-out"
+           [class.left-full]="!isPanelOnLeft"
+           [class.right-full]="isPanelOnLeft"
+           [class.ml-3]="!isPanelOnLeft"
+           [class.mr-3]="isPanelOnLeft"
            style="background: rgba(30, 25, 20, 0.80);
                   border: 1px solid rgba(251, 191, 36, 0.15);
                   box-shadow: 0 8px 32px rgba(0,0,0,0.5), 0 0 20px rgba(251, 191, 36, 0.06);">
@@ -69,4 +73,12 @@ export class FaceCardComponent {
    @Input() emotionConfidence: number = 0;
    @Input() probabilities: Record<string, number> = {};
    @Input() rppg: any = null;
+   @Input() screenWidth: number = 1920;
+
+   get isPanelOnLeft(): boolean {
+      // If the face is in the right 30% of the screen, flip panel to left
+      const panelWidth = 240;
+      const margin = 12;
+      return (this.x + this.width + panelWidth + margin) > this.screenWidth;
+   }
 }

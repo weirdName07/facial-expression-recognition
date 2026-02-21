@@ -47,14 +47,52 @@ class CameraThread:
 
     def __init__(self, camera_index: int = 0, target_fps: int = 15):
         self.cap = None
-        self.camera_index = camera_index
+        # Allow override via environment variable
+        env_cam = os.getenv("CAMERA_INDEX")
+        self.camera_index = int(env_cam) if env_cam is not None else self._find_best_camera(camera_index)
+        
         self.target_fps = target_fps
         self.frame_queue: queue.Queue = queue.Queue(maxsize=2)
         self._running = False
         self._thread = None
+        
+    def _find_best_camera(self, default_idx: int) -> int:
+        """
+        Windows Phone Link or virtual cameras often hijack index 0.
+        This probes indices 0-2 and picks the one that successfully opens
+        and has the highest default resolution (usually the real webcam).
+        """
+        log.info("Probing available cameras to avoid virtual/phone links...")
+        best_idx = default_idx
+        max_area = 0
+        
+        for idx in range(3):
+            # Using CAP_DSHOW for faster probing on Windows
+            cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+            if cap.isOpened():
+                w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+                h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+                area = w * h
+                log.info(f"Camera index {idx} found: {int(w)}x{int(h)}")
+                
+                # We assume the real webcam has a standard/higher resolution
+                # compared to dummy virtual interfaces.
+                if area > max_area:
+                    max_area = area
+                    best_idx = idx
+                cap.release()
+                
+        log.info(f"Selected Camera Index: {best_idx}")
+        return best_idx
 
     def start(self):
+        log.info(f"Starting VideoCapture on index {self.camera_index}...")
         self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
+        
+        if not self.cap.isOpened():
+            log.warning(f"Failed to open camera {self.camera_index}. Trying fallback to 0.")
+            self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+            
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         self.cap.set(cv2.CAP_PROP_FPS, 30)
@@ -89,6 +127,21 @@ class CameraThread:
         if self.cap:
             self.cap.release()
         log.info("Camera capture thread stopped")
+
+
+class BoxSmoother:
+    """EMA smoother for bounding box coordinates [x_min, y_min, x_max, y_max]."""
+    def __init__(self, alpha: float = 0.2):
+        self.alpha = alpha
+        self.state: np.ndarray | None = None
+
+    def smooth(self, box_coords: List[float]) -> List[float]:
+        box_arr = np.array(box_coords)
+        if self.state is None:
+            self.state = box_arr
+        else:
+            self.state = self.alpha * box_arr + (1 - self.alpha) * self.state
+        return [round(float(x), 4) for x in self.state]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -184,6 +237,7 @@ async def inference_loop(redis: RedisPubSub, camera: CameraThread):
             await asyncio.sleep(1.0)
 
             emotion_smoother = EMASmoother(alpha=0.25)
+            box_smoothers: Dict[str, BoxSmoother] = {}
             hr_engine = MockHeartRateEngine()
             frame_id = 0
 
@@ -205,6 +259,18 @@ async def inference_loop(redis: RedisPubSub, camera: CameraThread):
                     for face_data in detected:
                         fid = face_data["face_id"]
 
+                        # Smooth bounding box
+                        if fid not in box_smoothers:
+                            box_smoothers[fid] = BoxSmoother(alpha=0.25)
+                        
+                        bbox_raw = [
+                            face_data["bbox"]["x_min"],
+                            face_data["bbox"]["y_min"],
+                            face_data["bbox"]["x_max"],
+                            face_data["bbox"]["y_max"]
+                        ]
+                        sx1, sy1, sx2, sy2 = box_smoothers[fid].smooth(bbox_raw)
+
                         # Expression classification
                         try:
                             dominant, conf, probs = await asyncio.to_thread(
@@ -223,7 +289,9 @@ async def inference_loop(redis: RedisPubSub, camera: CameraThread):
                         rppg = hr_engine.step()
 
                         faces_payload[fid] = {
-                            "bbox": face_data["bbox"],
+                            "bbox": {
+                                "x_min": sx1, "y_min": sy1, "x_max": sx2, "y_max": sy2
+                            },
                             "tracking_confidence": face_data["confidence"],
                             "expression": {
                                 "dominant_emotion": dominant,
@@ -232,6 +300,12 @@ async def inference_loop(redis: RedisPubSub, camera: CameraThread):
                             },
                             "rppg": rppg,
                         }
+
+                    # Clean up old smoothers
+                    current_fids = {f["face_id"] for f in detected}
+                    for fid in list(box_smoothers.keys()):
+                        if fid not in current_fids:
+                            del box_smoothers[fid]
 
                     # ── Encode frame as base64 JPEG for frontend display ──
                     _, jpeg_buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
@@ -277,7 +351,7 @@ async def main():
     log.info("=" * 60)
 
     # ── Load AI models ──
-    log.info("Loading YOLOv11 face detector...")
+    log.info("Loading YOLO-Face detector...")
     await asyncio.to_thread(load_face_model)
 
     log.info("Loading PyTorch emotion classifier...")
