@@ -24,7 +24,8 @@ import { Component, Input } from '@angular/core';
            [class.mr-3]="isPanelOnLeft"
            style="background: rgba(30, 25, 20, 0.80);
                   border: 1px solid rgba(251, 191, 36, 0.15);
-                  box-shadow: 0 8px 32px rgba(0,0,0,0.5), 0 0 20px rgba(251, 191, 36, 0.06);">
+                  box-shadow: 0 8px 32px rgba(0,0,0,0.5), 0 0 20px rgba(251, 191, 36, 0.06);
+                  transform: scaleX(-1);">
       
          <!-- Identity Header -->
          <div class="flex justify-between items-center px-4 pt-3 pb-2">
