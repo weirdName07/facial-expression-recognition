@@ -9,4 +9,6 @@ ultralytics
 torch
 torchvision
 Pillow
+tf-keras
+deepface
 mediapipe

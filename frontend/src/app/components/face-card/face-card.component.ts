@@ -29,10 +29,14 @@ import { Component, Input } from '@angular/core';
       
          <!-- Identity Header -->
          <div class="flex justify-between items-center px-4 pt-3 pb-2">
-            <span class="text-sm font-semibold text-white tracking-wide">Guest</span>
-            <div class="flex items-center gap-1.5">
-               <div class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></div>
-               <span class="text-[9px] text-amber-300/60 font-mono">{{ (confidence * 100).toFixed(0) }}% CF</span>
+            <span class="text-sm font-semibold text-white tracking-wide">{{ identity }}</span>
+            <div class="flex items-center gap-1.5" *ngIf="gender !== 'Unknown'">
+               <div class="w-1.5 h-1.5 rounded-full animate-pulse"
+                    [ngClass]="gender === 'Woman' ? 'bg-pink-400' : (gender === 'Man' ? 'bg-cyan-400' : 'bg-amber-400')"></div>
+               <span class="text-[9px] font-mono"
+                     [ngClass]="gender === 'Woman' ? 'text-pink-300' : (gender === 'Man' ? 'text-cyan-300' : 'text-amber-300')">
+                  {{ gender | uppercase }}<span class="opacity-50 mx-1" *ngIf="age !== 'Unknown'">•</span>{{ age !== 'Unknown' ? age : '' }}
+               </span>
             </div>
          </div>
          
@@ -69,7 +73,9 @@ export class FaceCardComponent {
    @Input() y: number = 0;
    @Input() width: number = 0;
    @Input() height: number = 0;
-   @Input() confidence: number = 0;
+   @Input() identity: string = 'Guest';
+   @Input() gender: string = 'Unknown';
+   @Input() age: string = 'Unknown';
    @Input() emotion: string = 'Neutral';
    @Input() emotionConfidence: number = 0;
    @Input() probabilities: Record<string, number> = {};

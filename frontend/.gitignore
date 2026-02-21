@@ -1,3 +1,9 @@
+.jpg
+.png
+.jpeg
+
+/venv
+
 # See http://help.github.com/ignore-files/ for more about ignoring files.
 
 # Compiled output
@@ -40,3 +46,6 @@ testem.log
 # System files
 .DS_Store
 Thumbs.db
+
+/__pycache__
+/.angular

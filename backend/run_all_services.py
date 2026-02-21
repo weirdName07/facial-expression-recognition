@@ -135,7 +135,7 @@ class BoxSmoother:
         self.alpha = alpha
         self.state: np.ndarray | None = None
 
-    def smooth(self, box_coords: List[float]) -> List[float]:
+    def smooth(self, box_coords: list[float]) -> list[float]:
         box_arr = np.array(box_coords)
         if self.state is None:
             self.state = box_arr
@@ -237,7 +237,8 @@ async def inference_loop(redis: RedisPubSub, camera: CameraThread):
             await asyncio.sleep(1.0)
 
             emotion_smoother = EMASmoother(alpha=0.25)
-            box_smoothers: Dict[str, BoxSmoother] = {}
+            box_smoothers: dict[str, BoxSmoother] = {}
+            face_cache: dict[str, dict] = {}
             hr_engine = MockHeartRateEngine()
             frame_id = 0
 
@@ -245,7 +246,7 @@ async def inference_loop(redis: RedisPubSub, camera: CameraThread):
 
             try:
                 while start_event.is_set():
-                    await asyncio.sleep(0.066)  # ~15 FPS target
+                    await asyncio.sleep(0.01)  # Minimal sleep to yield to event loop, allows max FPS
 
                     frame = camera.get_frame()
                     if frame is None:
@@ -256,10 +257,12 @@ async def inference_loop(redis: RedisPubSub, camera: CameraThread):
 
                     # ── Build per-face data ──
                     faces_payload = {}
+                    current_time = time.time()
+                    
                     for face_data in detected:
                         fid = face_data["face_id"]
 
-                        # Smooth bounding box
+                        # 1. Smooth bounding box (Fast - Every Frame)
                         if fid not in box_smoothers:
                             box_smoothers[fid] = BoxSmoother(alpha=0.25)
                         
@@ -271,7 +274,41 @@ async def inference_loop(redis: RedisPubSub, camera: CameraThread):
                         ]
                         sx1, sy1, sx2, sy2 = box_smoothers[fid].smooth(bbox_raw)
 
-                        # Expression classification
+                        # 2. Identity & Demographics (Slow - Throttled/Cached)
+                        # We only re-run biometrics if it's a new face or every ~2 seconds (30 frames)
+                        cache_entry = face_cache.get(fid)
+                        should_refresh = (
+                            cache_entry is None or 
+                            (frame_id - cache_entry["last_throttle_frame"]) >= 30
+                        )
+
+                        if should_refresh:
+                            try:
+                                import backend.services.face_tracking.face_recognizer as fr
+                                # Run ID and Demographics in parallel threads
+                                identity_name, (gender, age) = await asyncio.gather(
+                                    asyncio.to_thread(fr.recognize_face, face_data["crop"]),
+                                    asyncio.to_thread(fr.analyze_demographics, face_data["crop"])
+                                )
+                                face_cache[fid] = {
+                                    "identity": identity_name,
+                                    "gender": gender,
+                                    "age": age,
+                                    "last_throttle_frame": frame_id
+                                }
+                            except Exception as e:
+                                log.warning(f"Face analysis failed for ID {fid}: {e}")
+                                # Use old values if failed, or defaults if new
+                                if cache_entry is None:
+                                    face_cache[fid] = {
+                                        "identity": "Guest", "gender": "Unknown", "age": "Unknown",
+                                        "last_throttle_frame": frame_id
+                                    }
+                        
+                        # Extract from cache
+                        biometrics = face_cache[fid]
+
+                        # 3. Expression classification (Fast - Every Frame)
                         try:
                             dominant, conf, probs = await asyncio.to_thread(
                                 classify_emotion, face_data["crop"]
@@ -285,10 +322,13 @@ async def inference_loop(redis: RedisPubSub, camera: CameraThread):
                             dominant = "Neutral"
                             conf = smoothed["Neutral"]
 
-                        # rPPG (mock)
+                        # 4. rPPG (Fast - Every Frame)
                         rppg = hr_engine.step()
 
                         faces_payload[fid] = {
+                            "identity": biometrics["identity"],
+                            "gender": biometrics["gender"],
+                            "age": biometrics["age"],
                             "bbox": {
                                 "x_min": sx1, "y_min": sy1, "x_max": sx2, "y_max": sy2
                             },
@@ -301,11 +341,14 @@ async def inference_loop(redis: RedisPubSub, camera: CameraThread):
                             "rppg": rppg,
                         }
 
-                    # Clean up old smoothers
+                    # Clean up old smoothers & caches
                     current_fids = {f["face_id"] for f in detected}
                     for fid in list(box_smoothers.keys()):
                         if fid not in current_fids:
                             del box_smoothers[fid]
+                    for fid in list(face_cache.keys()):
+                        if fid not in current_fids:
+                            del face_cache[fid]
 
                     # ── Encode frame as base64 JPEG for frontend display ──
                     _, jpeg_buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
@@ -320,6 +363,7 @@ async def inference_loop(redis: RedisPubSub, camera: CameraThread):
                     }
                     await redis.publish("inference_results", payload)
                     frame_id += 1
+
                 
                 log.info("Inference session ended (start_event cleared).")
 
@@ -356,6 +400,10 @@ async def main():
 
     log.info("Loading PyTorch emotion classifier...")
     await asyncio.to_thread(load_emotion_model)
+
+    log.info("Loading FaceNet Identity Recognizer...")
+    import backend.services.face_tracking.face_recognizer as fr
+    await asyncio.to_thread(fr.load_recognizer)
 
     # ── Camera Setup (lazily started in inference_loop) ──
     camera = CameraThread(camera_index=0, target_fps=15)

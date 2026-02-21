@@ -1,91 +1,88 @@
 """
-PyTorch Emotion Classifier — ResNet18 fine-tuned for FER2013 (7 emotions).
-
-If no pretrained FER checkpoint is found, creates a model from scratch
-using ImageNet-pretrained ResNet18 with a replaced classification head.
-The model will still produce outputs — just not accurate until trained.
-In practice you'd download a proper FER2013-trained checkpoint.
+Emotion Classifier using HSEmotion (trained on RAF-DB and AffectNet).
+Highly accurate and lightweight (EfficientNet-B0 or MobileNetV3).
 """
 
 import logging
 import numpy as np
-from pathlib import Path
+import cv2
 from typing import Dict, Tuple
-
-import torch
-import torch.nn as nn
-import torchvision.transforms as T
-from PIL import Image
+from hsemotion.facial_emotions import HSEmotionRecognizer
 
 log = logging.getLogger(__name__)
 
+# HSEmotion labels (8 classes):
+# ['angry', 'contempt', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise']
+# We adjust to match our frontend's expected 7 classes where possible.
+HSE_LABELS = ['Angry', 'Contempt', 'Disgust', 'Fear', 'Happy', 'Neutral', 'Sad', 'Surprise']
 EMOTION_CLASSES = ["Angry", "Disgust", "Fear", "Happy", "Sad", "Surprise", "Neutral"]
 
-# Preprocessing pipeline — FER2013 is 48x48 grayscale, but ResNet expects 224x224 RGB
-_transform = T.Compose([
-    T.Resize((224, 224)),
-    T.Grayscale(num_output_channels=3),  # Convert to 3-channel grayscale
-    T.ToTensor(),
-    T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-])
-
-_model = None
-_device = None
-
+_fer = None
 
 def load_model():
-    """Load the emotion classification model."""
-    global _model, _device
+    """Load the HSEmotion recognizer."""
+    global _fer
+    log.info("Loading HSEmotion (RAF-DB optimized) model...")
+    try:
+        # PyTorch 2.4+ has safe unpickling by default (weights_only=True).
+        # External libraries like timm/hsemotion often fail this check.
+        # We monkey-patch torch.load temporarily to allow the model to boot.
+        import torch
+        import functools
+        
+        orig_load = torch.load
+        # Force weights_only=False for the duration of this call
+        torch.load = functools.partial(orig_load, weights_only=False)
+        
+        try:
+            # enet_b0_8_best_vgaf is highly accurate (RAF-DB/AffectNet) and very fast
+            _fer = HSEmotionRecognizer(model_name='enet_b0_8_best_vgaf', device='cpu')
+        finally:
+            # Always restore original torch.load
+            torch.load = orig_load
+            
+        log.info("HSEmotion model loaded successfully")
+    except Exception as e:
+        log.error(f"Failed to load HSEmotion: {e}")
+        raise
 
-    _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    log.info(f"Emotion classifier device: {_device}")
-
-    models_dir = Path(__file__).parent.parent.parent / "models"
-    models_dir.mkdir(exist_ok=True)
-    checkpoint_path = models_dir / "fer_resnet18.pth"
-
-    # Build ResNet18 with 7-class head
-    from torchvision.models import resnet18, ResNet18_Weights
-    _model = resnet18(weights=ResNet18_Weights.DEFAULT)
-    _model.fc = nn.Linear(_model.fc.in_features, len(EMOTION_CLASSES))
-
-    if checkpoint_path.exists():
-        log.info(f"Loading FER checkpoint: {checkpoint_path}")
-        state = torch.load(str(checkpoint_path), map_location=_device)
-        _model.load_state_dict(state, strict=False)
-    else:
-        log.warning(
-            f"No FER checkpoint found at {checkpoint_path}. "
-            "Using ImageNet backbone — predictions will be random until a proper "
-            "FER2013-trained checkpoint is placed in backend/models/fer_resnet18.pth"
-        )
-
-    _model.to(_device)
-    _model.eval()
-    log.info("Emotion classifier loaded")
-
-
-def classify_emotion(face_crop_bgr: np.ndarray) -> Tuple[str, float, Dict[str, float]]:
+def classify_emotion(face_crop: np.ndarray) -> Tuple[str, float, Dict[str, float]]:
     """
-    Classify the dominant emotion from a BGR face crop.
-
-    Returns:
-        (dominant_emotion, confidence, probabilities_dict)
+    Classify expression using HSEmotion.
     """
-    if _model is None:
-        raise RuntimeError("Model not loaded. Call load_model() first.")
+    if _fer is None:
+        load_model()
 
-    # Convert BGR → RGB → PIL → tensor
-    rgb = face_crop_bgr[:, :, ::-1]  # BGR → RGB
-    pil_img = Image.fromarray(rgb)
-    tensor = _transform(pil_img).unsqueeze(0).to(_device)
+    try:
+        # HSEmotion expects RGB
+        rgb_img = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
+        
+        # predict_emotions returns (label, probs)
+        label, probs = _fer.predict_emotions(rgb_img, logits=False)
+        
+        # Map HSE 8-class to our 7-class system
+        # We merge 'Contempt' into 'Neutral' or just ignore it for the dominant
+        prob_dict_raw = {HSE_LABELS[i]: round(float(probs[i]), 4) for i in range(len(HSE_LABELS))}
+        
+        # Construct the final 7-class dict
+        final_probs = {
+            "Angry": prob_dict_raw["Angry"],
+            "Disgust": prob_dict_raw["Disgust"],
+            "Fear": prob_dict_raw["Fear"],
+            "Happy": prob_dict_raw["Happy"],
+            "Sad": prob_dict_raw["Sad"],
+            "Surprise": prob_dict_raw["Surprise"],
+            "Neutral": round(prob_dict_raw["Neutral"] + prob_dict_raw["Contempt"], 4)
+        }
+        
+        dominant = max(final_probs, key=final_probs.get)
+        confidence = final_probs[dominant]
+        
+        return dominant, confidence, final_probs
 
-    with torch.no_grad():
-        logits = _model(tensor)
-        probs = torch.softmax(logits, dim=1).squeeze().cpu().numpy()
-
-    prob_dict = {EMOTION_CLASSES[i]: round(float(probs[i]), 4) for i in range(len(EMOTION_CLASSES))}
-    dominant = max(prob_dict, key=prob_dict.get)
-    confidence = prob_dict[dominant]
-
-    return dominant, confidence, prob_dict
+    except Exception as e:
+        log.warning(f"HSEmotion inference failed: {e}")
+        # Return Neutral as fallback
+        fallback_probs = {c: 0.1428 for c in EMOTION_CLASSES}
+        fallback_probs["Neutral"] = 1.0
+        return "Neutral", 1.0, fallback_probs

@@ -65,50 +65,78 @@ def detect_faces(frame: np.ndarray, conf_threshold: float = 0.4) -> List[Dict[st
 
     h, w = frame.shape[:2]
     
-    # YOLO inference
-    results = _model(frame, verbose=False, conf=conf_threshold)
+    # YOLO prediction (running without .track to avoid 'lap' dependency)
+    results = _model.predict(frame, verbose=False, conf=conf_threshold)
 
-    faces = []
+    detected_faces = []
     for r in results:
         boxes = r.boxes
-        for i, box in enumerate(boxes):
-            # This is a dedicated face model, so we don't need to filter by class
+        if boxes is None:
+            continue
+            
+        for box in boxes:
             conf = float(box.conf[0])
             x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-
-            # Normalised coords
-            x_min = max(0.0, x1 / w)
-            y_min = max(0.0, y1 / h)
-            x_max = min(1.0, x2 / w)
-            y_max = min(1.0, y2 / h)
-
-            # Optional: Add a small margin for better emotion classification
-            margin = 0.05
-            mw = x_max - x_min
-            mh = y_max - y_min
-            x_min = max(0.0, x_min - mw * margin)
-            y_min = max(0.0, y_min - mh * margin)
-            x_max = min(1.0, x_max + mw * margin)
-            y_max = min(1.0, y_max + mh * margin)
-
-            # Pixel coords for cropping
-            px1, py1 = int(max(0, x_min * w)), int(max(0, y_min * h))
-            px2, py2 = int(min(w, x_max * w)), int(min(h, y_max * h))
             
-            crop = frame[py1:py2, px1:px2]
-            if crop.size == 0:
-                continue
-
-            faces.append({
-                "face_id": f"face_{i + 1}",
-                "bbox": {
-                    "x_min": round(float(x_min), 4),
-                    "y_min": round(float(y_min), 4),
-                    "x_max": round(float(x_max), 4),
-                    "y_max": round(float(y_max), 4),
-                },
-                "confidence": round(float(conf), 3),
-                "crop": crop,
+            # Centroid
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+            
+            detected_faces.append({
+                "bbox_raw": [x1, y1, x2, y2],
+                "centroid": (cx, cy),
+                "conf": conf
             })
 
-    return faces
+    # ── Simple Centroid Tracker ──
+    global _next_id, _id_centroids
+    if '_next_id' not in globals():
+        _next_id = 1
+        _id_centroids = {} # {id: (cx, cy)}
+
+    new_id_centroids = {}
+    final_faces = []
+
+    for face in detected_faces:
+        cx, cy = face["centroid"]
+        
+        # Find best match in id_centroids
+        best_id = None
+        min_dist = 50.0 # Pixel threshold
+        
+        for fid, old_center in _id_centroids.items():
+            dist = np.sqrt((cx - old_center[0])**2 + (cy - old_center[1])**2)
+            if dist < min_dist:
+                min_dist = dist
+                best_id = fid
+        
+        if best_id is None:
+            best_id = _next_id
+            _next_id += 1
+        
+        new_id_centroids[best_id] = (cx, cy)
+        
+        # Prepare final dict
+        x1, y1, x2, y2 = face["bbox_raw"]
+        x_min, y_min = max(0.0, x1/w), max(0.0, y1/h)
+        x_max, y_max = min(1.0, x2/w), min(1.0, y2/h)
+
+        # Margin
+        margin = 0.05
+        mw, mh = x_max - x_min, y_max - y_min
+        x_min, y_min = max(0.0, x_min - mw*margin), max(0.0, y_min - mh*margin)
+        x_max, y_max = min(1.0, x_max + mw*margin), min(1.0, y_max + mh*margin)
+
+        px1, py1 = int(x_min * w), int(y_min * h)
+        px2, py2 = int(x_max * w), int(y_max * h)
+        crop = frame[py1:py2, px1:px2]
+        
+        if crop.size > 0:
+            final_faces.append({
+                "face_id": f"face_{best_id}",
+                "bbox": {"x_min": x_min, "y_min": y_min, "x_max": x_max, "y_max": y_max},
+                "confidence": face["conf"],
+                "crop": crop
+            })
+
+    _id_centroids = new_id_centroids
+    return final_faces

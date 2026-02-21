@@ -47,8 +47,8 @@
          <app-face-card [faceId]="id" [x]="faces[id].bbox.x_min * viewportWidth"
             [y]="faces[id].bbox.y_min * viewportHeight"
             [width]="(faces[id].bbox.x_max - faces[id].bbox.x_min) * viewportWidth"
-            [height]="(faces[id].bbox.y_max - faces[id].bbox.y_min) * viewportHeight"
-            [confidence]="faces[id].tracking_confidence" [emotion]="faces[id].expression?.dominant_emotion"
+            [height]="(faces[id].bbox.y_max - faces[id].bbox.y_min) * viewportHeight" [identity]="faces[id].identity"
+            [gender]="faces[id].gender" [age]="faces[id].age" [emotion]="faces[id].expression?.dominant_emotion"
             [emotionConfidence]="faces[id].expression?.confidence" [probabilities]="faces[id].expression?.probabilities"
             [rppg]="faces[id].rppg" [screenWidth]="viewportWidth">
          </app-face-card>
