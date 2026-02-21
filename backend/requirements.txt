@@ -11,4 +11,7 @@ torchvision
 Pillow
 tf-keras
 deepface
+hsemotion
+timm==0.9.16
+scipy
 mediapipe

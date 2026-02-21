@@ -34,6 +34,7 @@ from backend.services.face_tracking.face_detector import load_model as load_face
 from backend.services.expression_recognition.emotion_classifier import (
     load_model as load_emotion_model, classify_emotion, EMOTION_CLASSES
 )
+from backend.services.heart_rate.rppg_engine import RPPGEngine
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger("unified-runner")
@@ -239,7 +240,7 @@ async def inference_loop(redis: RedisPubSub, camera: CameraThread):
             emotion_smoother = EMASmoother(alpha=0.25)
             box_smoothers: dict[str, BoxSmoother] = {}
             face_cache: dict[str, dict] = {}
-            hr_engine = MockHeartRateEngine()
+            hr_engines: dict[str, RPPGEngine] = {}
             frame_id = 0
 
             log.info("Inference session active — processing real camera frames")
@@ -283,19 +284,20 @@ async def inference_loop(redis: RedisPubSub, camera: CameraThread):
                         )
 
                         if should_refresh:
+                            import backend.services.face_tracking.face_recognizer as fr
+                            # Run ID and Demographics in parallel threads
                             try:
-                                import backend.services.face_tracking.face_recognizer as fr
-                                # Run ID and Demographics in parallel threads
-                                identity_name, (gender, age) = await asyncio.gather(
-                                    asyncio.to_thread(fr.recognize_face, face_data["crop"]),
-                                    asyncio.to_thread(fr.analyze_demographics, face_data["crop"])
-                                )
-                                face_cache[fid] = {
-                                    "identity": identity_name,
+                                # Identities & Demographics (Slow)
+                                person_name = await asyncio.to_thread(fr.recognize_face, face_data["crop"])
+                                gender, age = await asyncio.to_thread(fr.analyze_demographics, face_data["crop"], fid)
+                                
+                                biometrics = {
+                                    "identity": person_name,
                                     "gender": gender,
                                     "age": age,
                                     "last_throttle_frame": frame_id
                                 }
+                                face_cache[fid] = biometrics
                             except Exception as e:
                                 log.warning(f"Face analysis failed for ID {fid}: {e}")
                                 # Use old values if failed, or defaults if new
@@ -323,7 +325,19 @@ async def inference_loop(redis: RedisPubSub, camera: CameraThread):
                             conf = smoothed["Neutral"]
 
                         # 4. rPPG (Fast - Every Frame)
-                        rppg = hr_engine.step()
+                        if fid not in hr_engines:
+                            hr_engines[fid] = RPPGEngine(fs=15.0) # Match target FPS
+                        
+                        bpm, quality = hr_engines[fid].update(face_data["crop"])
+                        pulse_data = hr_engines[fid].get_waveform(window_size=60)
+                        state = hr_engines[fid].get_state()
+                        
+                        rppg_payload = {
+                            "bpm": bpm,
+                            "waveform": pulse_data,
+                            "quality_score": quality,
+                            "calibration_state": state["state_text"]
+                        }
 
                         faces_payload[fid] = {
                             "identity": biometrics["identity"],
@@ -338,7 +352,7 @@ async def inference_loop(redis: RedisPubSub, camera: CameraThread):
                                 "probabilities": smoothed,
                                 "confidence": round(conf, 3),
                             },
-                            "rppg": rppg,
+                            "rppg": rppg_payload,
                         }
 
                     # Clean up old smoothers & caches
@@ -349,6 +363,9 @@ async def inference_loop(redis: RedisPubSub, camera: CameraThread):
                     for fid in list(face_cache.keys()):
                         if fid not in current_fids:
                             del face_cache[fid]
+                    for fid in list(hr_engines.keys()):
+                        if fid not in current_fids:
+                            del hr_engines[fid]
 
                     # ── Encode frame as base64 JPEG for frontend display ──
                     _, jpeg_buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
@@ -384,7 +401,14 @@ async def inference_loop(redis: RedisPubSub, camera: CameraThread):
 #  MAIN
 # ═══════════════════════════════════════════════════════════════════
 async def run_gateway():
-    config = uvicorn.Config(gateway_app, host="0.0.0.0", port=8000, log_level="info")
+    config = uvicorn.Config(
+        gateway_app, 
+        host="0.0.0.0", 
+        port=8000, 
+        log_level="info",
+        ws_ping_interval=None, # Disable to prevent AssertionError crashes during heavy inference
+        ws_ping_timeout=None
+    )
     server = uvicorn.Server(config)
     await server.serve()
 
