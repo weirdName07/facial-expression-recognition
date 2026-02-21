@@ -1,0 +1,77 @@
+<main class="w-screen h-screen relative bg-dark-900 overflow-hidden font-sans">
+
+   <!-- Header HUD -->
+   <header class="absolute top-0 left-0 right-0 z-50 p-4 flex justify-between items-start pointer-events-none">
+      <div class="flex items-center gap-3">
+         <div
+            class="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-400 to-blue-600 flex items-center justify-center shadow-[0_0_20px_rgba(34,211,238,0.4)]">
+            <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                  d="M14 10l-2 1m0 0l-2-1m2 1v2.5M20 7l-2 1m2-1l-2-1m2 1v2.5M14 4l-2-1-2 1M4 7l2-1M4 7l2 1M4 7v2.5M12 21l-2-1m2 1l2-1m-2 1v-2.5M6 18l-2-1v-2.5M18 18l2-1v-2.5" />
+            </svg>
+         </div>
+         <div>
+            <h1 class="text-lg font-bold tracking-tight text-white/90">Sentinel <span
+                  class="text-cyan-400 text-xs font-mono tracking-widest pl-2">AI.HUB</span></h1>
+            <div class="flex items-center gap-2 mt-0.5">
+               <div class="w-1.5 h-1.5 rounded-full"
+                  [ngClass]="isConnected ? 'bg-emerald-500 animate-pulse shadow-[0_0_10px_rgba(16,185,129,0.8)]' : 'bg-rose-500'">
+               </div>
+               <span class="text-[10px] font-mono text-white/60">{{ isConnected ? 'DATALINK SECURE' : 'CONNECTING...'
+                  }}</span>
+            </div>
+         </div>
+      </div>
+
+      <div
+         class="backdrop-blur-md bg-white/5 border border-white/10 rounded-lg p-2 px-4 shadow-lg flex items-center gap-4">
+         <div class="flex flex-col text-right">
+            <span class="text-[9px] text-white/50 tracking-widest uppercase">E2E Latency</span>
+            <span class="text-xs font-mono text-white" [class.text-amber-400]="backendLatencyMs > 150">{{
+               backendLatencyMs.toFixed(0) }} ms</span>
+         </div>
+         <div class="w-px h-6 bg-white/10"></div>
+         <div class="flex flex-col text-right">
+            <span class="text-[9px] text-white/50 tracking-widest uppercase">FPS</span>
+            <span class="text-xs font-mono text-cyan-400">{{ fps > 0 ? fps.toFixed(1) : '--' }}</span>
+         </div>
+      </div>
+   </header>
+
+   <!-- Fullscreen Camera -->
+   <app-camera-stream class="absolute inset-0 w-full h-full"></app-camera-stream>
+
+   <!-- Annotation Overlay -->
+   <div class="absolute inset-0 pointer-events-none overflow-hidden">
+      <ng-container *ngFor="let id of objectKeys(faces)">
+
+         <!-- Bounding Box + Info Panel -->
+         <app-face-card [faceId]="id" [x]="faces[id].bbox.x_min * viewportWidth"
+            [y]="faces[id].bbox.y_min * viewportHeight"
+            [width]="(faces[id].bbox.x_max - faces[id].bbox.x_min) * viewportWidth"
+            [height]="(faces[id].bbox.y_max - faces[id].bbox.y_min) * viewportHeight"
+            [confidence]="faces[id].tracking_confidence" [emotion]="faces[id].expression?.dominant_emotion"
+            [emotionConfidence]="faces[id].expression?.confidence"
+            [probabilities]="faces[id].expression?.probabilities">
+         </app-face-card>
+
+         <!-- Waveform inside the glass panel area -->
+         <div class="absolute transition-all duration-200 ease-out z-10 pointer-events-auto
+                    backdrop-blur-xl bg-white/[0.07] border border-white/[0.15] 
+                    rounded-2xl shadow-[0_8px_32px_rgba(0,0,0,0.4)] p-4" style="width: 250px;"
+            [style.left.px]="(faces[id].bbox.x_max * viewportWidth) + 16 + 3"
+            [style.top.px]="(faces[id].bbox.y_min * viewportHeight) + 340">
+            <app-bio-signal-waveform *ngIf="faces[id].rppg != null" [bpm]="faces[id].rppg.bpm"
+               [quality]="faces[id].rppg.quality_score" [waveform]="faces[id].rppg.waveform"
+               [state]="faces[id].rppg.calibration_state">
+            </app-bio-signal-waveform>
+         </div>
+
+      </ng-container>
+   </div>
+
+   <!-- Vignette -->
+   <div class="absolute inset-0 pointer-events-none"
+      style="background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.35) 100%);"></div>
+
+</main>
