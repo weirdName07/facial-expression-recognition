@@ -1,8 +1,7 @@
-version: "3.8"
-
 services:
   redis:
     image: redis:7-alpine
+    container_name: facial_recognition_redis
     ports:
       - "6379:6379"
     healthcheck:
@@ -10,3 +9,40 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - app-network
+
+  backend:
+    build: ./backend
+    container_name: facial_recognition_backend
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    # Note: On Linux, uncomment the next line to pass through the webcam
+    # devices:
+    #   - "/dev/video0:/dev/video0"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - app-network
+
+  frontend:
+    build: ./frontend
+    container_name: facial_recognition_frontend
+    ports:
+      - "4200:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge

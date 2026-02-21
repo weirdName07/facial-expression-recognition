@@ -1,6 +1,7 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from backend.shared.redis_client import RedisPubSub
+from contextlib import asynccontextmanager
 import asyncio
 import json
 import logging
@@ -39,15 +40,22 @@ manager = ConnectionManager()
 r = RedisPubSub()
 start_event = asyncio.Event()
 
-@app.on_event("startup")
-async def startup_event():
-    # Start Redis subscription listener in the background
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
     asyncio.create_task(r.subscribe("inference_results", manager.broadcast))
     logging.info("Gateway service started and connected to Redis inference_results channel.")
-
-@app.on_event("shutdown")
-async def shutdown_event():
+    yield
+    # Shutdown
     await r.close()
+    logging.info("Gateway service shutdown complete.")
+
+app = FastAPI(title="Facial Expression Event Gateway", lifespan=lifespan)
+
+@app.get("/health")
+async def health_check():
+    """Health check for Docker/K8s monitoring."""
+    return {"status": "ok", "connections": len(manager.active_connections)}
 
 @app.websocket("/ws/stream")
 async def websocket_endpoint(websocket: WebSocket):

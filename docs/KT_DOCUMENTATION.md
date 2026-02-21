@@ -8,8 +8,16 @@ This document provides a comprehensive guide to the project structure, the utili
 - `docs/`: Technical documentation, roadmaps, and protocol specs.
 - `run_all.ps1`: Automation script to launch both backend and frontend simultaneously.
 - `README.md`: High-level entry point with architecture and setup instructions.
-- `docker-compose.yml`: (Optional) Infrastructure orchestration for Redis/services.
-- `yolo11n.pt`: (Redundant - Cleaned) Base YOLO weights.
+- `docker-compose.yml`: Full-stack orchestration for Redis, Backend, and Frontend.
+- `.env.example`: Template for production environment variables.
+
+---
+
+## 🏗️ DevOps & Deployment
+- `backend/Dockerfile`: Built on `python:3.12-slim`. includes system dependencies for OpenCV/Mediapipe.
+- `frontend/Dockerfile`: Multi-stage build (Node build → Nginx serve).
+- **Service Orchestration**: Redis (Internal) → Backend (Port 8000) → Frontend (Port 4200).
+- **Health Monitoring**: Both services include health checks for automatic orchestration recovery.
 
 ---
 

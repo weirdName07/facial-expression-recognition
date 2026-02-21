@@ -16,6 +16,7 @@ import time
 import math
 import random
 import logging
+import signal
 import threading
 import queue
 
@@ -237,6 +238,18 @@ async def inference_loop(redis: RedisPubSub, camera: CameraThread):
             # Give camera a moment to initialise
             await asyncio.sleep(1.0)
 
+            # Signal handler for graceful shutdown
+            stop_event = asyncio.Event()
+
+            def handle_signal():
+                log.info("Received stop signal...")
+                stop_event.set()
+                start_event.clear()
+
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, handle_signal)
+            
             emotion_smoother = EMASmoother(alpha=0.25)
             box_smoothers: dict[str, BoxSmoother] = {}
             face_cache: dict[str, dict] = {}
@@ -246,7 +259,7 @@ async def inference_loop(redis: RedisPubSub, camera: CameraThread):
             log.info("Inference session active — processing real camera frames")
 
             try:
-                while start_event.is_set():
+                while start_event.is_set() and not stop_event.is_set():
                     await asyncio.sleep(0.01)  # Minimal sleep to yield to event loop, allows max FPS
 
                     frame = camera.get_frame()
@@ -381,6 +394,8 @@ async def inference_loop(redis: RedisPubSub, camera: CameraThread):
                     await redis.publish("inference_results", payload)
                     frame_id += 1
 
+                if stop_event.is_set():
+                    break
                 
                 log.info("Inference session ended (start_event cleared).")
 
@@ -389,9 +404,11 @@ async def inference_loop(redis: RedisPubSub, camera: CameraThread):
             finally:
                 camera.stop()
                 log.info("Camera released.")
-                # Clear any remaining frames
-                while camera.get_frame() is not None:
-                    pass
+                while not camera.frame_queue.empty():
+                    camera.get_frame()
+
+            if stop_event.is_set():
+                 break
 
     except asyncio.CancelledError:
         log.info("Inference loop cancelled")
