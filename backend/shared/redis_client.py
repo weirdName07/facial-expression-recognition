@@ -1,10 +1,13 @@
 import json
+import os
 import redis.asyncio as redis
 from typing import Any, Callable
 
 class RedisPubSub:
-    def __init__(self, host='localhost', port=6379, db=0):
-        self.redis_client = redis.Redis(host=host, port=port, db=db, decode_responses=True)
+    def __init__(self):
+        host = os.environ.get("REDIS_HOST", "localhost")
+        port = int(os.environ.get("REDIS_PORT", 6379))
+        self.redis_client = redis.Redis(host=host, port=port, db=0, decode_responses=True)
         self.pubsub = self.redis_client.pubsub()
 
     async def publish(self, channel: str, message: dict):
